@@ -426,7 +426,7 @@ with tabs[0]:
     
     # --- 1. ЛОГИКА ФИЛЬТРАЦИИ И РАСЧЕТОВ ---
     
-    # АВТОМАТИКА
+    # АВТОМАТИКА (Чат закрылся сам)
     mask_bot_closed = (df_gsheet['Статус'] == 'Закрыл')
     mask_auth_success = df_gsheet['Тип обращения'].str.contains('Авторизация пройдена', case=False, na=False)
     mask_stub = (df_gsheet['Тип обращения'] == 'Заглушка на старый чат')
@@ -434,58 +434,60 @@ with tabs[0]:
     count_bot_closed = len(df_gsheet[mask_bot_closed])
     count_auth_success = len(df_gsheet[mask_auth_success])
     count_stub = len(df_gsheet[mask_stub])
-    total_automation = count_bot_closed + count_auth_success + count_stub
-
-    # УЧАСТИЕ ЧЕЛОВЕКА (Специфические категории)
+    
+    # ЧЕЛОВЕК (Участие оператора)
     mask_confirm = df_gsheet['Статус'].isin(['Ручник: Позовите человека', 'Ручник: Обзвон и отмены'])
     mask_courier = (df_gsheet['Статус'] == 'Меню курьеров')
-    mask_auth_fail = df_gsheet['Тип обращения'].str.contains('Авторизация не пройдена', case=False, na=False)
+    mask_auth_fail = df_gsheet['Тип обращения'].str.startswith('Авторизация не пройдена', na=False)
     
     count_confirm = len(df_gsheet[mask_confirm])
     count_courier = len(df_gsheet[mask_courier])
     count_auth_fail = len(df_gsheet[mask_auth_fail])
 
-    # ЛЮДИ (ОСТАЛЬНОЕ) 
-    # Считаем общее кол-во людей как разницу между всеми уникальными чатами и автоматикой
-    # Или через API, если это более надежный источник уникальных ID
-    count_total_human = count_human_chats # Значение из API, полученное выше в коде
-    count_other_human = max(0, count_total_human - count_confirm - count_courier - count_auth_fail)
+    # Бот (общее участие для KPI)
+    bot_participated_df = df_gsheet[df_gsheet['Статус'].isin(['Закрыл', 'Перевод'])]
+    participated_count = len(bot_participated_df)
+    transferred_count = participated_count - count_bot_closed
 
-    total_all = total_automation + count_total_human
+    # Остальные люди (Все, кто не попал в спец. категории выше)
+    # Используем общее кол-во из API и вычитаем уже разложенные категории
+    count_other_human = max(0, count_human_chats - count_confirm - count_courier - count_auth_fail)
+    
+    # Итоговый счет
+    total_all = count_bot_closed + count_auth_success + count_stub + count_human_chats
 
     # --- 2. KPI ПАНЕЛЬ ---
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Всего чатов", total_all)
-    c2.metric("Бот (Закрыл)", count_bot_closed) # Убрали delta (зеленую процентовку)
-    c3.metric("Люди (Всего)", count_total_human)
-    c4.metric("Заглушка", count_stub)
-    c5.metric("Авторизация", count_auth_success + count_auth_fail)
+    cols = st.columns(6)
+    cols[0].metric("Всего чатов", total_all)
+    cols[1].metric("Участие бота", participated_count)
+    cols[2].metric("Бот (Закрыл)", count_bot_closed) # УБРАЛИ ДЕЛЬТУ
+    cols[3].metric("Люди (Всего)", count_human_chats)
+    cols[4].metric("Заглушка", count_stub)
+    cols[5].metric("Авторизация", count_auth_success + count_auth_fail)
 
     st.divider()
 
-    # --- 3. ДИАГРАММА ---
-    col_pies = st.columns([1.5, 1]) # Левая колонка чуть шире для диаграммы
+    # --- 3. ВИЗУАЛИЗАЦИЯ (DONUT CHART) ---
+    col_pies = st.columns([1.5, 1])
     
     with col_pies[0]:
         st.subheader("Распределение нагрузки")
         if total_all > 0:
-            # Сегменты
             labels = [
                 '🤖 Бот (Закрыл)', '🔑 Авториз. (ОК)', '⚙️ Заглушка',
-                '✅ Подтверждение', '🚚 Меню курьеров', '👤 Люди (Прочее)'
+                '✅ Подтверждение', '🚚 Меню курьеров', '👤 Остальные люди'
             ]
             sizes = [
                 count_bot_closed, count_auth_success, count_stub,
                 count_confirm, count_courier, (count_other_human + count_auth_fail)
             ]
             
-            # Цвета: Теплые для автоматики, Холодные для людей
-            colors = [
-                '#ff9999', '#ffcc99', '#d3d3d3', # Автоматика: красный, оранжевый, серый
-                '#66b3ff', '#4db8ff', '#007acc'  # Человек: оттенки синего
-            ]
+            # Цвета: Теплые/Серые для Автоматики, Синие для Людей
+            colors = ['#ff9999', '#ffcc99', '#d3d3d3', '#66b3ff', '#4db8ff', '#007acc'] 
             
             fig1, ax1 = plt.subplots(figsize=(6, 6))
+            
+            # Рисуем Pie
             wedges, texts, autotexts = ax1.pie(
                 sizes, 
                 labels=labels, 
@@ -493,10 +495,10 @@ with tabs[0]:
                 colors=colors, 
                 startangle=140,
                 pctdistance=0.82,
-                textprops={'fontsize': 10}
+                explode=[0.05 if i == 0 else 0 for i in range(len(labels))] # Выделяем Бот (Закрыл)
             )
             
-            # Donut style
+            # Превращаем в Donut (дырка посередине)
             centre_circle = plt.Circle((0,0), 0.70, fc='white')
             fig1.gca().add_artist(centre_circle)
             
@@ -505,26 +507,23 @@ with tabs[0]:
 
     with col_pies[1]:
         st.subheader("Детализация")
-        # Краткий текстовый отчет для быстрой сверки
         st.markdown(f"""
-        **Автоматика ({total_automation} шт.):**
+        **Автоматика ({count_bot_closed + count_auth_success + count_stub} шт.):**
         * Бот справился: `{count_bot_closed}`
         * Авторизация (Авто): `{count_auth_success}`
         * Заглушки: `{count_stub}`
 
-        **Человек ({count_total_human} шт.):**
+        **Человек ({count_human_chats} шт.):**
         * Подтверждение заказов: `{count_confirm}`
         * Меню курьеров: `{count_courier}`
-        * Авториз. (Не пройдена): `{count_auth_fail}`
-        * Остальные обращения: `{count_other_human}`
+        * Авториз. (Ручная): `{count_auth_fail}`
+        * Прочие обращения: `{count_other_human}`
         """)
-
-        # Метрика эффективности бота (на основе участия)
-        bot_part = len(df_gsheet[df_gsheet['Статус'].isin(['Закрыл', 'Перевод'])])
-        if bot_part > 0:
-            eff = (count_bot_closed / bot_part) * 100
-            st.write(f"---")
-            st.write(f"📈 Эффективность бота: **{eff:.1f}%**")
+        
+        st.write("---")
+        if participated_count > 0:
+            eff = (count_bot_closed / participated_count) * 100
+            st.info(f"🎯 Эффективность бота: **{eff:.1f}%**")
 
 # TAB 2: LOAD
 with tabs[1]:
